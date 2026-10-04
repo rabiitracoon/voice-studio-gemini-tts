@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ko">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Voice Studio · 대본에 맞춰서 TTS 제작</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="/"><span class="brand-mark">v<span></span></span><span>voice studio<small>대본에 맞춰서 TTS 제작</small></span></a>
+  <button id="new-project" class="primary wide">＋ 새 음성 작업</button>
+  <div class="side-heading">내 작업 <span id="project-count">0</span></div><nav id="projects" aria-label="저장한 작업"></nav>
+  <div class="sidebar-bottom"><button id="open-settings" class="subtle wide">⚙ 연결 및 목소리 설정</button><div class="connection"><span id="connection-dot" class="dot"></span><span id="connection">연결 확인 중</span></div><span class="local-label">이 Mac에 작업이 저장됩니다</span></div>
+</aside>
+<main>
+  <header><span class="breadcrumb">워크스페이스 <span>/</span> 음성 제작</span><span class="model-pill">Gemini 3.8 Flash TTS</span></header>
+  <section class="intro"><div><div class="eyebrow">SCRIPT TO SPEECH</div><h1>대본의 감정을,<br>목소리로.</h1><p>한 글자도 바꾸지 않고, 이야기의 결을 살려 읽습니다.</p></div><div class="sound-art" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></section>
+  <ol class="steps"><li id="step-1" class="active"><b>01</b><span>대본 입력<small>원문 그대로</small></span></li><li id="step-2"><b>02</b><span>감정 태그 검수<small>어투와 호흡 조절</small></span></li><li id="step-3"><b>03</b><span>음성 생성<small>같은 목소리로</small></span></li></ol>
+  <div id="notice" class="notice" role="status" hidden></div>
+  <section id="workspace" class="workspace">
+    <div class="script-pane">
+      <div class="pane-heading"><h2>대본</h2><label class="file-label">텍스트 불러오기<input id="script-file" type="file" accept=".txt,text/plain" hidden></label></div>
+      <label class="field-label" for="title">작업 이름</label><input id="title" class="title-input" placeholder="예: 우주 이야기 1화" maxlength="100">
+      <textarea id="script" aria-label="대본 원문" placeholder="여기에 대본을 붙여 넣으세요.&#10;&#10;문장, 띄어쓰기, 문장부호는 그대로 보존됩니다. 감정 태그만 추가해 이야기의 흐름을 살립니다." maxlength="60000" spellcheck="false"></textarea>
+      <div class="script-footer"><span id="script-count">0자</span><span id="source-status">원문을 입력해 주세요</span></div>
+      <label class="field-label" for="notes">연출 메모 <span>선택</span></label><textarea id="notes" class="notes" placeholder="예: 차분한 다큐멘터리 톤. 놀라운 장면은 경외감을 살려 주세요." maxlength="1500"></textarea>
+      <button id="analyze" class="primary wide">감정 태그 만들기 <span>↗</span></button><small class="helper" id="analysis-model">ChatGPT OAuth · GPT-6.1 Sol</small>
+    </div>
+    <div class="review-pane">
+      <div class="pane-heading"><h2>Gemini 프롬프트 검수</h2><span id="segment-count" class="badge">준비 전</span></div>
+      <div class="voice-strip"><div class="voice-field"><span>고정 목소리</span><voice-picker id="work-voice" value="Kore" aria-label="이번 작업의 고정 목소리"></voice-picker></div><label>읽기 속도<select id="work-pace"><option value="natural">자연스럽게</option><option value="slow">여유 있게</option><option value="brisk">경쾌하게</option></select></label><label>생성 구간<select id="work-chunk"><option value="1400">균형 · 권장</option><option value="800">짧게</option><option value="2200">길게</option></select></label></div>
+      <div id="review-empty" class="empty"><div class="empty-icon">≋</div><h3>이야기에 어울리는 감정을 찾아요</h3><p>대본을 넣고 감정 태그를 만들면<br>구간별 어투와 호흡을 여기서 검수할 수 있습니다.</p><div class="example-tag">따뜻함 <span>· warm and reassuring</span></div></div>
+      <div id="prompt-review" class="prompt-review" hidden>
+        <div class="prompt-heading"><label for="gemini-prompt">Gemini에 전달할 프롬프트</label><button id="copy-prompt" class="text-button">복사</button></div>
+        <p class="prompt-help">연출 지시는 어투를 조절하고, 읽을 대본만 음성으로 읽습니다. 구간 번호와 제목은 검수를 위한 표시입니다.</p>
+        <textarea id="gemini-prompt" class="prompt-textbox" readonly spellcheck="false" aria-describedby="prompt-status" placeholder="Gemini에 전달할 내용을 준비하고 있습니다."></textarea>
+        <div class="prompt-meta"><span id="prompt-status" role="status">입력 내용 확인 중…</span><span id="prompt-profile"></span></div>
+        <details id="directions-editor" class="directions-editor"><summary>연출 지시 수정 <span>어투 · 쉼 · 호흡</span></summary>
+          <p class="helper">아래 텍스트 박스에서 연출 지시를 수정하면 위 프롬프트에도 반영됩니다. 원문은 그대로 보존됩니다.</p>
+          <div id="review-toolbar" class="review-toolbar" hidden><span>감정 이름은 분석 참고용입니다. 실제 연출 지시를 확인하세요.</span><button id="plain-style" class="text-button">연출 태그 모두 비우기</button></div>
+          <div id="annotations" class="annotations"></div>
+        </details>
+      </div>
+      <div id="approval" class="approval" hidden><label class="check-label"><input id="review-confirm" type="checkbox"> Gemini 프롬프트와 고정 목소리를 확인했습니다.</label><div class="approval-actions"><button id="save-review" class="secondary">검수 저장</button><button id="approve" class="primary">검수 완료</button></div><span id="approval-status" class="helper">검수 완료 후에만 음성을 생성할 수 있습니다.</span></div>
+    </div>
+  </section>
+  <section class="generation-bar"><div><span class="eyebrow">READY WHEN YOU ARE</span><h3 id="generation-title">목소리에 담을 준비를 해주세요</h3><p id="generation-subtitle">감정 태그를 검수한 뒤 음성을 생성할 수 있습니다.</p></div><div class="generation-actions"><button id="cancel" class="secondary" hidden>작업 취소</button><button id="generate" class="primary" disabled>음성 생성 <span>▶</span></button></div></section>
+  <div id="progress-wrap" class="progress-wrap" hidden><div class="progress"><div id="progress-fill"></div></div><p id="progress-message"></p></div>
+  <section id="output" class="output" hidden></section>
+  <footer>VOICE STUDIO <span>원문 보존 · 감정 검수 · 고정 목소리 · WAV</span></footer>
+</main>
+<dialog id="settings-dialog"><div class="dialog-heading"><div><div class="eyebrow">YOUR VOICE, EVERY TIME</div><h2>연결 및 목소리 설정</h2></div><button id="close-settings" class="icon-button" aria-label="닫기">×</button></div>
+  <div class="settings-grid"><section><h3>ChatGPT 연결</h3><p id="oauth-message"></p><button id="login" class="secondary">ChatGPT OAuth 로그인</button><span id="login-message" class="helper"></span><label class="field-label" for="gpt-model">감정 분석 모델</label><input id="gpt-model" value="gpt-6.1-sol" placeholder="gpt-6.1-sol"><p class="helper">새 모델이 나오면 모델 ID를 바꾸어 사용할 수 있습니다.</p></section>
+  <section><h3>Gemini 연결</h3><p id="key-message"></p><label class="field-label" for="api-key">API 키 입력 / 교체</label><input id="api-key" type="password" autocomplete="off" placeholder="현재 키는 표시하지 않습니다"><label class="field-label" for="tts-model">음성 생성 모델</label><div class="input-button"><input id="tts-model" list="tts-models" value="gemini-3.8-flash-tts"><button id="load-models" class="secondary">조회</button></div><datalist id="tts-models"></datalist><p class="helper">Gemini 3.8 TTS 규격의 모델을 사용하세요.</p></section></div>
+  <section class="voice-settings"><div class="pane-heading"><h3>기본 목소리</h3><button id="load-voices" class="text-button">한국어 음성 목록 불러오기</button></div><voice-picker id="voice-id" value="Kore" aria-label="기본 목소리"></voice-picker><p class="helper">선택한 음성 ID를 매번 재사용합니다. 전용 목소리를 만들면 음색의 일관성을 더 높일 수 있습니다.</p>
+  <details><summary>전용 목소리 한 번 만들기</summary><p>원하는 음색과 발음을 1–2문장으로 설명하세요. 한 번 생성한 음성 ID를 계속 사용합니다. Gemini API 비용이 발생합니다.</p><div class="settings-grid"><label>목소리 이름<input id="design-name" maxlength="80" value="나의 한국어 내레이터"></label><label>목소리 성별<select id="design-gender"><option value="female">여성</option><option value="male">남성</option><option value="neutral">중성</option></select></label></div><textarea id="design-description" class="notes" maxlength="800">A warm, clear Korean narrator with natural standard Seoul Korean pronunciation, a gentle mid-range voice and a calm documentary delivery.</textarea><button id="design-voice" class="secondary">전용 목소리 생성</button><div id="design-result"></div></details></section>
+  <div class="dialog-footer"><p>API 키는 이 Mac의 비공개 파일에 저장됩니다.<br>새 작업의 기본값이 바뀝니다. 진행 중인 작업은 별도로 검수하세요.</p><button id="save-settings" class="primary">설정 저장</button></div>
+</dialog>
+<script type="module" src="/app.js"></script>
+</body></html>

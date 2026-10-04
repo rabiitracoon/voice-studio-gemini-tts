@@ -1,0 +1,7 @@
+data/
+dist/
+validation/
+API key*
+.env*
+!.env.example
+.DS_Store
