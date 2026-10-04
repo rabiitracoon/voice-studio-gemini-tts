@@ -3,20 +3,23 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {mkdir,readFile,writeFile,rename,readdir,copyFile,stat} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
-import {DEFAULTS,VOICES,EMOTIONS,EVENTS,check,shortText,profile,hash,splitScript,validateAnnotations,reviewHash,taggedScript,speechParts,chunkParts,promptPreview} from './lib/core.mjs';
+import {DEFAULTS,PROVIDERS,VOICES,EMOTIONS,EVENTS,check,shortText,profile,hash,splitScript,validateAnnotations,reviewHash,taggedScript,speechParts,chunkParts,promptPreview} from './lib/core.mjs';
 import {Gemini} from './lib/gemini.mjs';
-import {authStatus,annotate,login} from './lib/codex.mjs';
+import * as codex from './lib/codex.mjs';
+import * as claude from './lib/claude.mjs';
 import {joinWavs,audioStats,parseWav} from './lib/audio.mjs';
+import {Templates,DEFAULT_TEMPLATE} from './lib/templates.mjs';
+import {annotationPrompt} from './lib/annotation.mjs';
 
 export const ROOT=path.dirname(fileURLToPath(import.meta.url));
 const UUID=/^[0-9a-f-]{36}$/;
 async function jsonWrite(file,value) {const temp=file+'.'+randomUUID()+'.tmp';await writeFile(temp,JSON.stringify(value,null,2),{mode:0o600});await rename(temp,file);}
 const summaries=p=>({id:p.id,title:p.title,createdAt:p.createdAt,updatedAt:p.updatedAt,status:p.status,segmentCount:p.segments.length});
 
-export async function createStudio({root=ROOT,workspace=process.env.TTS_WORKSPACE||root,gemini=new Gemini(workspace),analyzer=annotate,auth=authStatus,loginFn=login}={}) {
+export async function createStudio({root=ROOT,workspace=process.env.TTS_WORKSPACE||root,gemini=new Gemini(workspace),analyzer=args=>(args.project.profile.provider==='claude'?claude:codex).annotate(args),auth=provider=>(provider==='claude'?claude:codex).authStatus(),loginFn=(provider,signal)=>(provider==='claude'?claude:codex).login(signal)}={}) {
   const data=path.join(workspace,'data');await mkdir(path.join(data,'projects'),{recursive:true,mode:0o700});
   await mkdir(path.join(data,'audio-cache'),{recursive:true,mode:0o700});await mkdir(path.join(data,'voice-previews'),{recursive:true,mode:0o700});
-  await gemini.load();let settings=profile(DEFAULTS);
+  await gemini.load();let settings=profile(DEFAULTS);const templates=await new Templates(data).load();
   try {settings=profile(JSON.parse(await readFile(path.join(data,'settings.json'),'utf8')));}catch{}
   const projects=new Map(),jobs=new Map();
   for(const id of await readdir(path.join(data,'projects')))if(UUID.test(id))try {
@@ -63,20 +66,37 @@ export async function createStudio({root=ROOT,workspace=process.env.TTS_WORKSPAC
     p.status='complete';p.progress.message='음성이 완성되었습니다. 재생해서 확인하고 WAV로 내려받으세요.';
   }
   let authCache=null,authTime=0;
-  async function status() {if(Date.now()-authTime>15000){authCache=await auth();authTime=Date.now();}return {appId:'voice-studio-v1',workspaceId:hash(workspace),oauth:authCache,gemini:gemini.status(),settings,voices:VOICES,emotions:EMOTIONS,events:EVENTS};}
-  let loginJob=null;
+  async function status() {if(Date.now()-authTime>15000){const [gpt,claude]=await Promise.all([auth('gpt'),auth('claude')]);authCache={gpt,claude};authTime=Date.now();}return {appId:'voice-studio-v1',workspaceId:hash(workspace),oauth:authCache,gemini:gemini.status(),settings,voices:VOICES,emotions:EMOTIONS,events:EVENTS};}
+  const loginJobs={};
+  function loginProvider(value) {const provider=value??'gpt';check(PROVIDERS.includes(provider),'감정 분석 AI를 확인해 주세요.');return provider;}
   async function route(method,url,body) {
     const segments=url.pathname.split('/').filter(Boolean);
     if(url.pathname==='/api/status' && method==='GET')return status();
     if(url.pathname==='/api/settings' && method==='POST') {settings=profile(body);if(body.apiKey)await gemini.save(body.apiKey);await jsonWrite(path.join(data,'settings.json'),settings);return {settings,gemini:gemini.status()};}
     if(url.pathname==='/api/login' && method==='POST') {
-      check(loginJob?.state!=='waiting','로그인이 이미 진행 중입니다.',409);
-      loginJob={state:'waiting',message:'열린 브라우저에서 ChatGPT 로그인을 완료해 주세요.'};
-      const controller=new AbortController();loginJob.controller=controller;
-      loginFn(controller.signal).then(()=>{authTime=0;loginJob={state:'complete',message:'로그인 완료. 연결 상태를 새로 확인해 주세요.'};}).catch(e=>{loginJob={state:'error',message:gemini.redact(e.message)};});
-      return {state:loginJob.state,message:loginJob.message};
+      const provider=loginProvider(body.provider),name=provider==='claude'?'Claude':'ChatGPT';
+      check(loginJobs[provider]?.state!=='waiting','로그인이 이미 진행 중입니다.',409);
+      const controller=new AbortController(),job={state:'waiting',message:`열린 브라우저에서 ${name} 로그인을 완료해 주세요.`,controller};loginJobs[provider]=job;
+      loginFn(provider,controller.signal).then(()=>{authTime=0;loginJobs[provider]={state:'complete',message:'로그인 완료. 연결 상태를 새로 확인해 주세요.'};}).catch(e=>{loginJobs[provider]={state:'error',message:gemini.redact(e.message)};});
+      return {state:job.state,message:job.message};
     }
-    if(url.pathname==='/api/login' && method==='GET')return loginJob?{state:loginJob.state,message:loginJob.message}:{state:'idle'};
+    if(url.pathname==='/api/login' && method==='GET') {const job=loginJobs[loginProvider(url.searchParams.get('provider'))];return job?{state:job.state,message:job.message}:{state:'idle'};}
+    if(url.pathname==='/api/templates' && method==='GET')return {templates:templates.list(),defaultId:DEFAULT_TEMPLATE};
+    if(url.pathname==='/api/templates' && method==='POST')return {template:await templates.save({name:body.name,content:body.content})};
+    if(segments[0]==='api' && segments[1]==='templates' && segments[2] && method==='POST') {
+      const id=segments[2],action=segments[3];
+      if(!action)return {template:await templates.save({id,name:body.name,content:body.content})};
+      if(action==='reset')return {template:await templates.reset(id)};
+      if(action==='delete') {await templates.remove(id);if(settings.templateId===id){settings=profile({...settings,templateId:DEFAULT_TEMPLATE});await jsonWrite(path.join(data,'settings.json'),settings);}return {deleted:true,settings};}
+    }
+    // Shows the exact analysis prompt (fixed rules + genre guide + data) without calling any model.
+    if(url.pathname==='/api/analysis-prompt' && method==='POST') {
+      const draft=profile(body.profile),saved=templates.get(draft.templateId);
+      const template=typeof body.content==='string'?{name:shortText(body.name??saved?.name??'',40,'템플릿 이름'),content:shortText(body.content,8000,'템플릿 내용')}:saved;
+      check(template,'분석 템플릿을 찾을 수 없습니다.',404);
+      const script=typeof body.script==='string'&&body.script.length?body.script:'';shortText(body.notes||'',1500,'연출 메모',true);
+      return {text:annotationPrompt({notes:body.notes||'',script,profile:draft,segments:script?splitScript(script):[]},template)};
+    }
     if(url.pathname==='/api/models' && method==='GET')return {models:await gemini.models()};
     if(url.pathname==='/api/voices' && method==='GET')return {voices:await gemini.listVoices()};
     if(url.pathname==='/api/voices' && method==='POST') {
@@ -100,7 +120,9 @@ export async function createStudio({root=ROOT,workspace=process.env.TTS_WORKSPAC
       }
       if(action==='configure' && method==='POST') {idle(p);p.profile=profile(body.profile);p.approvedHash=null;p.status=p.annotations.length?'review':'draft';await save(p);return visible(p);}
       if(action==='analyze' && method==='POST') {
-        startJob(p,'analyzing',async signal=>{const annotations=await analyzer({project:p,cwd:path.join(projectDir(p),'analysis',randomUUID()),signal});check(!signal.aborted,'작업이 취소되었습니다.');p.annotations=validateAnnotations(p.segments,annotations);p.approvedHash=null;p.status='review';p.progress={done:1,total:1,message:'감정 태그를 검수해 주세요.'};});return visible(p);
+        const template=templates.get(p.profile.templateId);check(template,'분석 템플릿을 찾을 수 없습니다. 다른 템플릿을 선택해 주세요.',409);
+        startJob(p,'analyzing',async signal=>{const annotations=await analyzer({project:p,template,cwd:path.join(projectDir(p),'analysis',randomUUID()),signal});check(!signal.aborted,'작업이 취소되었습니다.');p.annotations=validateAnnotations(p.segments,annotations);
+          p.analysis={at:new Date().toISOString(),provider:p.profile.provider,model:p.profile.provider==='claude'?p.profile.claudeModel:p.profile.gptModel,templateId:template.id,templateName:template.name,templateContent:template.content};p.approvedHash=null;p.status='review';p.progress={done:1,total:1,message:'감정 태그를 검수해 주세요.'};});return visible(p);
       }
       if(action==='review' && method==='POST') {
         idle(p);const next=validateAnnotations(p.segments,body.annotations),nextProfile=profile(body.profile);
@@ -151,7 +173,7 @@ export async function createStudio({root=ROOT,workspace=process.env.TTS_WORKSPAC
       else {res.writeHead(200,{'Content-Type':type,'Accept-Ranges':'bytes','Content-Length':info.size});res.end(req.method==='HEAD'?undefined:content);}
     }catch(e){if(!res.headersSent)respond(e.status|| (e.code==='ENOENT'?404:500),{error:gemini.redact(e.message)});else res.end();}
   });
-  return {server,projects,jobs,status,async close(){loginJob?.controller?.abort();for(const c of jobs.values())c.abort();await Promise.allSettled([...jobs.values()].map(c=>c.task));await new Promise(resolve=>server.close(resolve));}};
+  return {server,projects,jobs,status,async close(){for(const j of Object.values(loginJobs))j.controller?.abort();for(const c of jobs.values())c.abort();await Promise.allSettled([...jobs.values()].map(c=>c.task));await new Promise(resolve=>server.close(resolve));}};
 }
 if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const studio=await createStudio();const port=Number(process.env.TTS_PORT||4319);

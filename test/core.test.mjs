@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {splitScript,validateAnnotations,hash,reviewHash,speechParts,chunkParts,ttsBody,DEFAULTS,profile} from '../lib/core.mjs';
 import {wav,parseWav,joinWavs,audioStats} from '../lib/audio.mjs';
 import {Gemini} from '../lib/gemini.mjs';
-function project(script='첫 번째 문장입니다.\r\n\r\n두 번째 문장입니다!  '){const segments=splitScript(script);return {script,sourceHash:hash(script),segments,profile:{...DEFAULTS},annotations:segments.map(s=>({id:s.id,emotion:'담담함',style:'calm',reason:'차분하게',before:'',after:''}))};}
+import {parseClaudeResult} from '../lib/claude.mjs';
+function project(script='첫 번째 문장입니다.\r\n\r\n두 번째 문장입니다!  '){const segments=splitScript(script);return {script,sourceHash:hash(script),segments,profile:{...DEFAULTS,energy:'natural'},annotations:segments.map(s=>({id:s.id,emotion:'담담함',style:'calm',reason:'차분하게',before:'',after:''}))};}
 
 test('원문 공백·CRLF·분해형 한글·이모지를 문자 단위로 보존한다',()=>{
   for(const script of ['  안녕!\r\n\r\n좋은 아침. \t끝입니다.  ','대본입니다. 🎙️ 안녕하세요?\n끝!','한'.repeat(900)+'😀'.repeat(300)+' 끝.']){const parts=splitScript(script);assert.equal(parts.map(s=>s.text).join(''),script);for(const s of parts){assert.equal(script.slice(s.start,s.end),s.text);assert.ok(!/[\uD800-\uDBFF]$/.test(s.text));}}
@@ -46,3 +47,39 @@ test('WAV 결합은 RIFF 메타데이터를 건너뛰고 오디오 샘플만 보
 test('잘린 음성·다른 샘플링률·무음은 구분한다',()=>{assert.throws(()=>parseWav(wav(Buffer.alloc(8)).subarray(0,46)));const wrong=wav(Buffer.alloc(8));wrong.writeUInt32LE(8000,24);assert.throws(()=>parseWav(wrong));assert.equal(audioStats(wav(Buffer.alloc(8))).peakDb,null);});
 test('API 응답의 MAX_TOKENS는 완성된 음성으로 저장하지 않는다',async()=>{const g=new Gemini('/tmp',{fetchImpl:async()=>new Response(JSON.stringify({candidates:[{finishReason:'MAX_TOKENS'}]}),{status:200})});g.secret='test-not-a-real-key';await assert.rejects(g.synthesize(speechParts(project()),DEFAULTS),/완성되지/);});
 test('Gemini 키는 쿼리·요청 본문에 포함되지 않는다',async()=>{let request;const audio=wav(Buffer.alloc(40));const g=new Gemini('/tmp',{fetchImpl:async(url,args)=>{request={url,...args};return new Response(JSON.stringify({candidates:[{finishReason:'STOP',content:{parts:[{inlineData:{mimeType:'audio/wav',data:audio.toString('base64')}}]}}]}),{status:200});}});g.secret='test-not-a-real-key';await g.synthesize(speechParts(project()),DEFAULTS);assert.equal(request.headers['x-goog-api-key'],g.secret);assert.ok(!request.url.includes(g.secret));assert.ok(!request.body.includes(g.secret));assert.equal(g.redact('key '+g.secret),'key [비공개 키]');});
+test('감정 분석 AI와 Claude 모델 ID를 지정할 수 있고 잘못된 값은 거부한다',()=>{
+  assert.equal(profile(DEFAULTS).provider,'gpt');
+  assert.equal(profile({...DEFAULTS,provider:'claude',claudeModel:'claude-future-5'}).claudeModel,'claude-future-5');
+  assert.throws(()=>profile({...DEFAULTS,provider:'other'}));assert.throws(()=>profile({...DEFAULTS,claudeModel:'../invalid'}));
+});
+test('감정 분석 AI 변경은 승인 해시를 바꾸지 않고, 요청 형식이 바뀐 이전 승인은 다시 검수해야 한다',()=>{
+  const p=project(),initial=reviewHash(p),q=structuredClone(p);q.profile.provider='claude';q.profile.claudeModel='opus';assert.equal(reviewHash(q),initial);
+  const {provider,claudeModel,...old}=p.profile;
+  assert.notEqual(initial,hash({sourceHash:p.sourceHash,annotations:validateAnnotations(p.segments,p.annotations),profile:old}));
+});
+test('Claude CLI 결과에서 구조화 출력·텍스트 JSON·오류를 구분한다',()=>{
+  const annotations=[{id:'s0001'}];
+  assert.deepEqual(parseClaudeResult(JSON.stringify({type:'result',is_error:false,structured_output:{annotations}})).annotations,annotations);
+  assert.deepEqual(parseClaudeResult(JSON.stringify([{type:'system'},{type:'result',result:'```json\n{"annotations":[{"id":"s0001"}]}\n```'}])).annotations,annotations);
+  assert.throws(()=>parseClaudeResult(JSON.stringify({type:'result',is_error:true,result:'Not logged in'})),/Not logged in/);
+  assert.throws(()=>parseClaudeResult(JSON.stringify({type:'result',result:'JSON이 아닙니다'})),/JSON/);assert.throws(()=>parseClaudeResult('not json'));
+});
+test('연속된 같은 연출은 한 part로 합치고, 연출이 바뀌는 곳에서만 나눈다',()=>{
+  const p=project('첫 문장입니다. 둘째 문장인데,\n셋째 줄입니다. 넷째는 다릅니다. 다섯째도 다릅니다.');
+  const styles=['warm','warm','warm','hushed and tense','hushed and tense'];p.annotations.forEach((a,i)=>{a.style=styles[i];});p.annotations[3].before='<short pause>';
+  const parts=speechParts(p);assert.equal(p.segments.length,5);
+  assert.deepEqual(parts.map(x=>x.speech_metadata.style),['warm','hushed and tense']);
+  assert.equal(parts.map(x=>x.text).join(''),p.script.replace('넷째','<short pause>넷째'));
+  p.profile.pace='brisk';assert.deepEqual(speechParts(p).map(x=>x.speech_metadata.style),['warm, speaking rapidly','hushed and tense, speaking rapidly']);
+});
+test('같은 연출이어도 생성 구간 길이를 넘기지 않도록 part를 나눈다',()=>{
+  const p=project('같은 연출로 길게 이어지는 문장입니다. '.repeat(200));p.profile.chunkChars=800;
+  const parts=speechParts(p);assert.ok(parts.length>1);assert.ok(parts.every(x=>x.text.length+x.speech_metadata.style.length<=800));assert.equal(parts.map(x=>x.text).join(''),p.script);
+});
+test('연기 강도는 모든 연출 지시에 같은 문구로 붙고 승인 해시를 바꾼다',()=>{
+  const p=project(),natural=reviewHash(p);assert.equal(DEFAULTS.energy,'lively');
+  p.profile.energy='lively';assert.deepEqual(speechParts(p).map(x=>x.speech_metadata.style),['calm, animated and expressive']);assert.notEqual(reviewHash(p),natural);
+  p.annotations.forEach(a=>{a.style='';});p.profile.energy='dramatic';p.profile.pace='brisk';
+  assert.deepEqual(speechParts(p).map(x=>x.speech_metadata.style),['highly animated, vivid and emphatic, speaking rapidly']);
+  assert.throws(()=>profile({...DEFAULTS,energy:'loud'}));
+});
